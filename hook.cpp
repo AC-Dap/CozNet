@@ -67,7 +67,6 @@ int execve(const char *pathname, char *const argv[], char *const envp[]) {
 
 	Assumes packets will always be 256 bytes or less.
 	Calls malloc for the packet data that is stored to the waitqueue.
-	TODO: Replace both of these constraints with a memory pool in the future.
 */
 ssize_t read_to_waitqueue(int fd) {
 	MemoryPoolBuffer *mp_buf = mp.get_buf();
