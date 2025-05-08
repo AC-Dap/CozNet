@@ -5,6 +5,7 @@
 #include <time.h>
 #include <unistd.h>
 #include <cstdint>
+#include <signal.h>
 
 struct Profiler {
     Profiler(): ring_buffer(nullptr), perf_fd(-1), timer_delay_ns(0), processing(false),
@@ -41,10 +42,6 @@ private:
     size_t profile_counts;
 };
 
-extern Profiler p;
-
-void sigaction_process_samples(int signum, siginfo_t* info, void* ctx) {
-    p.process_samples();
-}
+void sigaction_process_samples(int signum, siginfo_t* info, void* ctx);
 
 #endif //PROFILER_H

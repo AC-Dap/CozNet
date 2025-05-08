@@ -14,15 +14,15 @@
 
 #include "profiler.hpp"
 
-typedef int (*main_fn_t)(int, char**, char**);
-main_fn_t real_main;
-
-// Global state
-Profiler p;
+extern Profiler p;
+void sigaction_process_samples(int signum, siginfo_t* info, void* ctx) {
+    p.process_samples();
+}
 
 // Largely copied from Coz
 bool Profiler::init(uint64_t profiled_ip, size_t sample_period, size_t batch_size) {
     struct perf_event_attr pe;
+    memset(&pe, 0, sizeof(struct perf_event_attr));
     pe.size = sizeof(struct perf_event_attr);
 
     //Profiler config
@@ -38,7 +38,7 @@ bool Profiler::init(uint64_t profiled_ip, size_t sample_period, size_t batch_siz
     // Init profiler
     perf_fd = syscall(SYS_perf_event_open, &pe, 0, -1, -1, PERF_FLAG_FD_CLOEXEC);
     if (perf_fd == -1) {
-        std::cerr << "Failed to open perf_event." << std::endl;
+        std::cerr << "Failed to open perf_event: " << strerror(errno) << std::endl;
         return false;
     }
 
@@ -182,42 +182,4 @@ void Profiler::process_samples() {
     }
 
     processing = false;
-}
-
-static int wrapped_main(int argc, char** argv, char** env) {
-    if (!p.init(0, 1000, 4)) {
-        std::cerr << "Failed to initialize profiler, running without it." << std::endl;
-        return real_main(argc, argv, env);
-    }
-
-    if (!p.start()) {
-        std::cerr << "Failed to start profiler, running without it." << std::endl;
-        return real_main(argc, argv, env);
-    }
-
-    // Run the real main function
-    int result = real_main(argc, argv, env);
-
-    // Increment the end-to-end progress point just before shutdown
-    /*if(end_to_end) {
-        throughput_point* end_point =
-          profiler::get_instance().get_throughput_point("end-to-end");
-        end_point->visit();
-    }*/
-
-    // Shut down the profiler
-    p.stop();
-
-    return result;
-}
-
-extern "C" int __libc_start_main(main_fn_t main_fn, int argc, char** argv,
-    void (*init)(), void (*fini)(), void (*rtld_fini)(), void* stack_end) {
-    // Save real main
-    real_main = main_fn;
-
-    auto real_libc_start_main = (decltype(__libc_start_main)*)dlsym(RTLD_NEXT, "__libc_start_main");
-
-    // Call start_main with our main function
-    return real_libc_start_main(wrapped_main, argc, argv, init, fini, rtld_fini, stack_end);
 }

@@ -10,8 +10,10 @@
 #include <ctime>
 #include <poll.h>
 #include <algorithm>
+#include <iostream>
 
 #include "hook.hpp"
+#include "profiler.hpp"
 #include "utils/mempool.hpp"
 #include "utils/time.hpp"
 #include "utils/waitqueue.hpp"
@@ -22,19 +24,22 @@ constexpr size_t PACKET_SIZE = 1024;
 typedef int(*execve_t)(const char *pathname, char *const argv[], char *const envp[]);
 typedef ssize_t(*read_t)(int fd, void *buf, size_t count);
 typedef ssize_t(*write_t)(int fd, const void *buf, size_t count);
+typedef int (*main_fn_t)(int, char**, char**);
 
 execve_t real_execve = nullptr;
 read_t real_read = nullptr;
 write_t real_write = nullptr;
+main_fn_t real_main = nullptr;
 
 // Global data structures
 WaitQueue wq;
 MemoryPool mp(128, PACKET_SIZE);
+Profiler p;
 
 /*
 	We hook into execve to ensure this file is LD_PRELOADed across execs.
 */
-int execve(const char *pathname, char *const argv[], char *const envp[]) {
+extern "C" int execve(const char *pathname, char *const argv[], char *const envp[]) {
 	if (!real_execve) {
 		real_execve = (execve_t) dlsym(RTLD_NEXT, "execve");
 	}
@@ -68,7 +73,7 @@ int execve(const char *pathname, char *const argv[], char *const envp[]) {
 	Assumes packets will always be 256 bytes or less.
 	Calls malloc for the packet data that is stored to the waitqueue.
 */
-ssize_t read_to_waitqueue(int fd) {
+extern "C" ssize_t read_to_waitqueue(int fd) {
 	MemoryPoolBuffer *mp_buf = mp.get_buf();
 	if (!mp_buf) {
 		fprintf(stderr, "Memory Pool empty!\n");
@@ -109,7 +114,7 @@ ssize_t read_to_waitqueue(int fd) {
 	return n;
 }
 
-ssize_t read(int fd, void *buf, size_t count) {
+extern "C" ssize_t read(int fd, void *buf, size_t count) {
     if (!real_read) {
         real_read = (read_t) dlsym(RTLD_NEXT, "read");
     }
@@ -160,7 +165,7 @@ ssize_t read(int fd, void *buf, size_t count) {
     }
 }
 
-ssize_t write(int fd, const void *buf, size_t count) {
+extern "C" ssize_t write(int fd, const void *buf, size_t count) {
 	if (!real_write) {
 		real_write = (write_t) dlsym(RTLD_NEXT, "write");
 	}
@@ -189,3 +194,40 @@ ssize_t write(int fd, const void *buf, size_t count) {
 	return ret - sizeof(MAGIC) - sizeof(PacketMetadata);
 }
 
+static int wrapped_main(int argc, char** argv, char** env) {
+	if (!p.init(0, 1000, 4)) {
+		std::cerr << "Failed to initialize profiler, running without it." << std::endl;
+		return real_main(argc, argv, env);
+	}
+
+	if (!p.start()) {
+		std::cerr << "Failed to start profiler, running without it." << std::endl;
+		return real_main(argc, argv, env);
+	}
+
+	// Run the real main function
+	int result = real_main(argc, argv, env);
+
+	// Increment the end-to-end progress point just before shutdown
+	/*if(end_to_end) {
+		throughput_point* end_point =
+		  profiler::get_instance().get_throughput_point("end-to-end");
+		end_point->visit();
+	}*/
+
+	// Shut down the profiler
+	p.stop();
+
+	return result;
+}
+
+extern "C" int __libc_start_main(main_fn_t main_fn, int argc, char** argv,
+	void (*init)(), void (*fini)(), void (*rtld_fini)(), void* stack_end) {
+	// Save real main
+	real_main = main_fn;
+
+	auto real_libc_start_main = (decltype(__libc_start_main)*)dlsym(RTLD_NEXT, "__libc_start_main");
+
+	// Call start_main with our main function
+	return real_libc_start_main(wrapped_main, argc, argv, init, fini, rtld_fini, stack_end);
+}
