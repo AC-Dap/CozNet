@@ -12,7 +12,7 @@ struct Profiler {
         hit_counts(0), profile_counts(0) {}
 
     // Initializes the profiler, but does not start it.
-    bool init(uint64_t profiled_ip, size_t sample_period, size_t batch_size);
+    bool init(uint64_t profiled_ip, size_t sample_period, size_t batch_size, size_t timer_period);
     bool start();
     bool stop();
 

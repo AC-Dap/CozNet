@@ -7,10 +7,10 @@ HPP_FILES=hook.hpp profiler.hpp utils/mempool.hpp utils/time.hpp utils/waitqueue
 all: cluster server dcuz
 
 cluster: cluster.c
-	cc cluster.c -o cluster $(PKG_CFLAGS) -Wl,-rpath=$(PKG_RPATH)
+	cc cluster.c -o cluster $(PKG_CFLAGS) -g -Wl,-rpath=$(PKG_RPATH)
 
 server: server.c
-	cc server.c -o server $(PKG_CFLAGS) -Wl,-rpath=$(PKG_RPATH)
+	cc server.c -o server $(PKG_CFLAGS) -g -Wl,-rpath=$(PKG_RPATH)
 
 dcuz: $(CPP_FILES) $(HPP_FILES)
 	g++ -shared -fPIC -ldl $(CPP_FILES) -o dcuz.so

@@ -7,7 +7,7 @@
 #include "../include/raft/uv.h"
 
 #define N_SERVERS 3    /* Number of servers in the example cluster */
-#define APPLY_RATE 1 /* Apply a new entry every 125 milliseconds */
+#define APPLY_RATE 10 /* Apply a new entry every 125 milliseconds */
 
 #define Log(SERVER_ID, FORMAT) printf("%d: " FORMAT "\n", SERVER_ID)
 #define Logf(SERVER_ID, FORMAT, ...) \

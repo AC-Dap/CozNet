@@ -20,7 +20,7 @@ void sigaction_process_samples(int signum, siginfo_t* info, void* ctx) {
 }
 
 // Largely copied from Coz
-bool Profiler::init(uint64_t profiled_ip, size_t sample_period, size_t batch_size) {
+bool Profiler::init(uint64_t profiled_ip, size_t sample_period, size_t batch_size, size_t timer_period) {
     struct perf_event_attr pe;
     memset(&pe, 0, sizeof(struct perf_event_attr));
     pe.size = sizeof(struct perf_event_attr);
@@ -61,14 +61,17 @@ bool Profiler::init(uint64_t profiled_ip, size_t sample_period, size_t batch_siz
         std::cerr << "Failed to create timer!" << std::endl;
         return false;
     }
-    timer_delay_ns = sample_period * batch_size;
+    timer_delay_ns = timer_period; //sample_period * batch_size;
 
     // Set up sigaction
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_sigaction = sigaction_process_samples;
     sa.sa_flags = SA_SIGINFO;
-    sigaction(SIGPROF, &sa, nullptr);
+    if (sigaction(SIGPROF, &sa, nullptr) != 0) {
+        std::cerr << "Unable to attach SIGPROF listener" << std::endl;
+        return false;
+    }
 
     this->profiled_ip = profiled_ip;
 
@@ -162,24 +165,30 @@ void Profiler::process_samples() {
     while(tail + sizeof(hdr) < head) {
         // Copy in packet
         copy_from_ring_buffer(tail, &hdr, sizeof(hdr));
-        copy_from_ring_buffer(tail + sizeof(hdr), record, hdr.size);
+        copy_from_ring_buffer(tail + sizeof(hdr), record, hdr.size - sizeof(hdr));
         tail += hdr.size;
 
         // Process ip and callstack
+        // An instruction pointer should only be in at most one at a time, so we can short circuit if we find a match.
         uint64_t ip;
         memcpy(&ip, record, sizeof(uint64_t));
-        if (ip == profiled_ip) hit_counts++;
-
-        // Process callstack
-        uint64_t nr;
-        memcpy(&nr, record + sizeof(uint64_t), sizeof(uint64_t));
-        for (size_t i = 0; i < nr; i++) {
-            memcpy(&ip, record + (i+2) * sizeof(uint64_t), sizeof(uint64_t));
-            if (ip == profiled_ip) hit_counts++;
+        if (ip == profiled_ip) {
+            hit_counts++;
+        } else {
+            uint64_t nr;
+            memcpy(&nr, record + sizeof(uint64_t), sizeof(uint64_t));
+            for (size_t i = 0; i < nr; i++) {
+                memcpy(&ip, record + (i+2) * sizeof(uint64_t), sizeof(uint64_t));
+                if (ip == profiled_ip) {
+                    hit_counts++;
+                    break;
+                }
+            }
         }
-
         profile_counts++;
     }
 
+    // Notify ring buf of our read data
+    ring_buf_info->data_tail = tail;
     processing = false;
 }

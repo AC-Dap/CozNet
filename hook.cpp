@@ -11,6 +11,8 @@
 #include <poll.h>
 #include <algorithm>
 #include <iostream>
+#include <link.h>
+#include <fstream>
 
 #include "hook.hpp"
 #include "profiler.hpp"
@@ -33,8 +35,18 @@ main_fn_t real_main = nullptr;
 
 // Global data structures
 WaitQueue wq;
-MemoryPool mp(128, PACKET_SIZE);
+MemoryPool mp(1024, PACKET_SIZE);
 Profiler p;
+
+bool reconstruct_envp(const char* env_name, char* envp, size_t envp_len) {
+	const char* env = getenv(env_name);
+	// env_name=env
+	if (env == nullptr || strlen(env_name) + 1 + strlen(env) > envp_len - 1) {
+		return false;
+	}
+	sprintf(envp, "%s=%s", env_name, env);
+	return true;
+}
 
 /*
 	We hook into execve to ensure this file is LD_PRELOADed across execs.
@@ -45,19 +57,28 @@ extern "C" int execve(const char *pathname, char *const argv[], char *const envp
 	}
 
 	char* new_envp[256];
+	size_t ncopied = 0;
 	char ld_preload_envp[256];
+	char dcuz_module_envp[256];
+	char dcuz_offset_envp[256];
 
-	// Create env variable with LD_PRELOAD
-	const char* ld_preload = getenv("LD_PRELOAD");
-	if (strlen("LD_PRELOAD=") + strlen(ld_preload) + 1 > 256) {
-		return E2BIG;
+	// Copy over necessary env vars
+	if (reconstruct_envp("LD_PRELOAD", ld_preload_envp, 256)) {
+		new_envp[ncopied] = ld_preload_envp;
+		ncopied++;
 	}
-	sprintf(ld_preload_envp, "LD_PRELOAD=%s", ld_preload);
-	new_envp[0] = ld_preload_envp;
+	if (reconstruct_envp("DCUZ_MODULE", dcuz_module_envp, 256)) {
+		new_envp[ncopied] = dcuz_module_envp;
+		ncopied++;
+	}
+	if (reconstruct_envp("DCUZ_OFFSET", dcuz_offset_envp, 256)) {
+		new_envp[ncopied] = dcuz_offset_envp;
+		ncopied++;
+	}
 
 	// Copy over other envp
-	for (int i = 1; i < 100; i++) {
-		new_envp[i] = envp[i - 1];
+	for (int i = ncopied; i < 100; i++) {
+		new_envp[i] = envp[i - ncopied];
 
 		if (new_envp[i] == nullptr) break;
 		if (i == 99) return E2BIG; // At end but no nullptr seen, too many env vars
@@ -73,7 +94,7 @@ extern "C" int execve(const char *pathname, char *const argv[], char *const envp
 	Assumes packets will always be 256 bytes or less.
 	Calls malloc for the packet data that is stored to the waitqueue.
 */
-extern "C" ssize_t read_to_waitqueue(int fd) {
+ssize_t read_to_waitqueue(int fd) {
 	MemoryPoolBuffer *mp_buf = mp.get_buf();
 	if (!mp_buf) {
 		fprintf(stderr, "Memory Pool empty!\n");
@@ -128,7 +149,7 @@ extern "C" ssize_t read(int fd, void *buf, size_t count) {
 	// If wait queue is currently empty, do a blocking read for a new packet
 	if (wq.get_size() == 0) {
 		ssize_t ret = read_to_waitqueue(fd);
-		if (ret < 0) return ret;
+		if (ret <= 0) return ret;
 	}
 	// Now, we're guaranteed wait queue has at least one element
 
@@ -194,8 +215,62 @@ extern "C" ssize_t write(int fd, const void *buf, size_t count) {
 	return ret - sizeof(MAGIC) - sizeof(PacketMetadata);
 }
 
+struct DlIterateData {
+	const char* target_lib_name;
+	uintptr_t base_address;
+	bool found;
+};
+
+static int find_library_callback(struct dl_phdr_info *info, size_t size, void *data) {
+	DlIterateData* search_data = static_cast<DlIterateData*>(data);
+
+	char exe[1024];
+	const char* dl_name = info->dlpi_name;
+	if (!dl_name || dl_name[0] == '\0') {
+		int ret = readlink("/proc/self/exe", exe, sizeof(exe)-1);
+		if(ret == -1) {
+			std::cerr << "Couldn't read /proc/self/exe" << std::endl;
+			return 0;
+		}
+		exe[ret] = 0;
+		dl_name = exe;
+	}
+
+	// std::cerr << "Loaded: " << dl_name << std::endl;
+
+	if (dl_name && strstr(dl_name, search_data->target_lib_name)) {
+		search_data->base_address = info->dlpi_addr; // This is the base address
+		search_data->found = true;
+		return 1; // Stop iteration
+	}
+	return 0; // Continue iteration
+}
+
 static int wrapped_main(int argc, char** argv, char** env) {
-	if (!p.init(0, 1000, 4)) {
+	// Read loaded modules
+	bool found = false;
+	uint64_t ip = 0;
+	char* module_name = getenv("DCUZ_MODULE");
+	char* module_offset = getenv("DCUZ_OFFSET");
+	if (module_name && module_offset) {
+		ip = std::stoi(module_offset, 0, 16);
+		DlIterateData search_data = { .target_lib_name = module_name };
+		dl_iterate_phdr(find_library_callback, &search_data);
+
+		found = search_data.found;
+		ip += search_data.base_address;
+	} else {
+		std::cerr << "DCUZ_MODULE or DCUZ_OFFSET not found, running without profiler." << std::endl;
+		return real_main(argc, argv, env);
+	}
+
+	if (!found) {
+		std::cerr << "Unable to find correct module and offset, running without profiler." << std::endl;
+		return real_main(argc, argv, env);
+	}
+
+	// std::cerr << "Found module " << module_name << ", profiling ip 0x" << std::hex << ip << std::endl;
+	if (!p.init(ip, 10000, 4, 1e7)) {
 		std::cerr << "Failed to initialize profiler, running without it." << std::endl;
 		return real_main(argc, argv, env);
 	}
@@ -217,6 +292,19 @@ static int wrapped_main(int argc, char** argv, char** env) {
 
 	// Shut down the profiler
 	p.stop();
+
+	std::ofstream outf;
+	std::string filename = std::to_string(getpid()) + ".txt";
+
+	outf.open(filename);
+	if (outf.is_open()) {
+		outf << p.get_hit_counts() << std::endl;
+		outf << p.get_profile_counts() << std::endl;
+		outf.close();
+	} else {
+		std::cerr << p.get_hit_counts() << std::endl;
+		std::cerr << p.get_profile_counts() << std::endl;
+	}
 
 	return result;
 }

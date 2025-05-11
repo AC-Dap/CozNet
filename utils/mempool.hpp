@@ -25,9 +25,6 @@ struct MemoryPool {
     }
 
     void return_buf(MemoryPoolBuffer* buf) {
-        if (!head) {
-            return;
-        }
         buf->next = head;
         head = buf;
     }

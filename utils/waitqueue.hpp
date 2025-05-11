@@ -19,7 +19,9 @@ struct WaitQueueEntry {
 
 struct WaitQueue {
     // Initialize with capacity for 16 entries.
-    WaitQueue() : entries(16) {}
+    WaitQueue() {
+        entries.reserve(16);
+    }
 
     inline WaitQueueEntry* get_head() {
         return entries.empty() ? nullptr : &entries[0];
