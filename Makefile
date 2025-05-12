@@ -1,8 +1,8 @@
 PKG_CFLAGS=$(shell pkg-config --cflags --libs raft libuv)
 PKG_RPATH=$(shell pkg-config --variable=libdir raft)
 
-CPP_FILES=hook.cpp profiler.cpp
-HPP_FILES=hook.hpp profiler.hpp utils/mempool.hpp utils/time.hpp utils/waitqueue.hpp
+CPP_FILES=hook.cpp profiler.cpp socket_hook.cpp
+HPP_FILES=hook.hpp profiler.hpp socket_hook.hpp utils/mempool.hpp utils/time.hpp
 
 all: cluster server dcuz
 

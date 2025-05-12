@@ -18,24 +18,14 @@
 #include "profiler.hpp"
 #include "utils/mempool.hpp"
 #include "utils/time.hpp"
-#include "utils/waitqueue.hpp"
-
-constexpr size_t MAGIC = 0xabcdeffedcba;
-constexpr size_t PACKET_SIZE = 1024;
 
 typedef int(*execve_t)(const char *pathname, char *const argv[], char *const envp[]);
-typedef ssize_t(*read_t)(int fd, void *buf, size_t count);
-typedef ssize_t(*write_t)(int fd, const void *buf, size_t count);
 typedef int (*main_fn_t)(int, char**, char**);
 
 execve_t real_execve = nullptr;
-read_t real_read = nullptr;
-write_t real_write = nullptr;
 main_fn_t real_main = nullptr;
 
 // Global data structures
-WaitQueue wq;
-MemoryPool mp(1024, PACKET_SIZE);
 Profiler p;
 
 bool reconstruct_envp(const char* env_name, char* envp, size_t envp_len) {
@@ -85,134 +75,6 @@ extern "C" int execve(const char *pathname, char *const argv[], char *const envp
 	}
 
 	return real_execve(pathname, argv, new_envp);
-}
-
-/**
-	Issue a blocking read to `fd`. Reads in a packet, then parses the metadata and adds it to the waitqueue
-	with the associated delay time.
-
-	Assumes packets will always be 256 bytes or less.
-	Calls malloc for the packet data that is stored to the waitqueue.
-*/
-ssize_t read_to_waitqueue(int fd) {
-	MemoryPoolBuffer *mp_buf = mp.get_buf();
-	if (!mp_buf) {
-		fprintf(stderr, "Memory Pool empty!\n");
-		return -1;
-	}
-	char* temp_buf = mp_buf->buffer;
-	ssize_t n = real_read(fd, temp_buf, PACKET_SIZE);
-	if (n <= 0) {
-		return n;
-	}
-
-	// Default if there is no metadata
-	timespec wakeup_time;
-	clock_gettime(CLOCK_MONOTONIC, &wakeup_time);
-	size_t data_offset = 0;
-
-	// Parse metadata
-	// First check size + read magic number
-	size_t temp_buf_magic = 0;
-	if (n > sizeof(MAGIC) + sizeof(PacketMetadata)) memcpy(&temp_buf_magic, temp_buf, sizeof(MAGIC));
-
-	if (temp_buf_magic == MAGIC) {
-		PacketMetadata meta;
-		memcpy(&meta, temp_buf + sizeof(MAGIC), sizeof(PacketMetadata));
-
-		// Add required delay to wakeup time
-		add_ns(&wakeup_time, 10000 * meta.number_server_calls);
-
-		// Set data offset past metadata
-		data_offset = sizeof(MAGIC) + sizeof(PacketMetadata);
-	}
-
-	// Add new packet to wait queue
-	// Use nread as starting offset
-	WaitQueueEntry entry = { .buffer = mp_buf, .len = size_t(n), .nread = data_offset, .wakeup_time = wakeup_time };
-	wq.push_entry(entry);
-
-	return n;
-}
-
-extern "C" ssize_t read(int fd, void *buf, size_t count) {
-    if (!real_read) {
-        real_read = (read_t) dlsym(RTLD_NEXT, "read");
-    }
-
-    // Passthrough for non-socket fds
-    struct stat statbuf;
-    if (fstat(fd, &statbuf) == -1 || !S_ISSOCK(statbuf.st_mode)) {
-        return real_read(fd, buf, count);
-    }
-
-	// If wait queue is currently empty, do a blocking read for a new packet
-	if (wq.get_size() == 0) {
-		ssize_t ret = read_to_waitqueue(fd);
-		if (ret <= 0) return ret;
-	}
-	// Now, we're guaranteed wait queue has at least one element
-
-	// Now process packet in wait queue
-	timespec now;
-    while (true) {
-        WaitQueueEntry *head = wq.get_head();
-    	clock_gettime(CLOCK_MONOTONIC, &now);
-
-        // Deliver if ready
-        if (time_passed(head->wakeup_time, now)) {
-            size_t avail = head->len - head->nread;
-            size_t to_copy = std::min(avail, count);
-            memcpy(buf, head->buffer->buffer + head->nread, to_copy);
-            head->nread += to_copy;
-            if (head->nread == head->len) {
-				mp.return_buf(head->buffer);
-                wq.pop_head();
-            }
-            return to_copy;
-        }
-
-        // Otherwise wait for either packet arrival or timeout
-        timespec timeout = time_diff(head->wakeup_time, now);
-        struct pollfd pfd = { .fd = fd, .events = POLLIN };
-        int ready = ppoll(&pfd, 1, &timeout, nullptr);
-
-		// New packet arrival
-        if (ready > 0 && (pfd.revents & POLLIN)) {
-			// Ignore any errors since we'll just return packets in our queue
-        	read_to_waitqueue(fd);
-        }
-        // Timeout: packet head is now ready, loop again to process
-    }
-}
-
-extern "C" ssize_t write(int fd, const void *buf, size_t count) {
-	if (!real_write) {
-		real_write = (write_t) dlsym(RTLD_NEXT, "write");
-	}
-
-	// If it's not socket, don't do anything special
-	struct stat statbuf;
-    if (fstat(fd, &statbuf) == -1 || !S_ISSOCK(statbuf.st_mode)) {
-		return real_write(fd, buf, count);
-	}
-
-	char new_buf[PACKET_SIZE];
-
-	// Copy over metadata before buf
-	PacketMetadata meta = {0};
-	memcpy(new_buf, &MAGIC, sizeof(MAGIC));
-	memcpy(new_buf + sizeof(MAGIC), &meta, sizeof(PacketMetadata));
-
-	// Copy buf into remaining space
-	size_t new_count = std::min(count + sizeof(MAGIC) + sizeof(PacketMetadata), PACKET_SIZE);
-	memcpy(new_buf + sizeof(MAGIC) + sizeof(PacketMetadata), buf, new_count - sizeof(MAGIC) - sizeof(PacketMetadata));
-
-	int ret = real_write(fd, new_buf, new_count);
-
-	// Hide metadata written
-	if (ret < 0) return ret;
-	return ret - sizeof(MAGIC) - sizeof(PacketMetadata);
 }
 
 struct DlIterateData {

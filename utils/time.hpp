@@ -4,7 +4,7 @@
 #include <ctime>
 
 #define BILLION 1000000000L
-void add_ns(timespec *t, long ns) {
+inline void add_ns(timespec *t, long ns) {
     time_t add_sec = ns / BILLION;
     ns = ns % BILLION;
 
@@ -24,7 +24,7 @@ inline bool time_passed(const timespec &a, const timespec &b) {
 /**
     Returns a - b. Assumes a > b.
 */
-timespec time_diff(const timespec &a, const timespec &b) {
+inline timespec time_diff(const timespec &a, const timespec &b) {
     time_t sec_diff = a.tv_sec - b.tv_sec;
     long nsec_diff = 0;
     if (a.tv_nsec < b.tv_nsec) {
