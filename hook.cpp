@@ -13,6 +13,7 @@
 #include <iostream>
 #include <link.h>
 #include <fstream>
+#include <unordered_map>
 
 #include "hook.hpp"
 #include "profiler.hpp"
@@ -27,6 +28,12 @@ main_fn_t real_main = nullptr;
 
 // Global data structures
 Profiler p;
+
+// How much a speedup call should virtually delay for
+size_t delay_length_ns = 0;
+
+// How much we've virtually delayed
+uint64_t delayed_ns = 0;
 
 bool reconstruct_envp(const char* env_name, char* envp, size_t envp_len) {
 	const char* env = getenv(env_name);
@@ -51,6 +58,7 @@ extern "C" int execve(const char *pathname, char *const argv[], char *const envp
 	char ld_preload_envp[256];
 	char dcuz_module_envp[256];
 	char dcuz_offset_envp[256];
+	char dcuz_speedup_envp[256];
 
 	// Copy over necessary env vars
 	if (reconstruct_envp("LD_PRELOAD", ld_preload_envp, 256)) {
@@ -63,6 +71,10 @@ extern "C" int execve(const char *pathname, char *const argv[], char *const envp
 	}
 	if (reconstruct_envp("DCUZ_OFFSET", dcuz_offset_envp, 256)) {
 		new_envp[ncopied] = dcuz_offset_envp;
+		ncopied++;
+	}
+	if (reconstruct_envp("DCUZ_SPEEDUP", dcuz_speedup_envp, 256)) {
+		new_envp[ncopied] = dcuz_speedup_envp;
 		ncopied++;
 	}
 
@@ -98,8 +110,6 @@ static int find_library_callback(struct dl_phdr_info *info, size_t size, void *d
 		dl_name = exe;
 	}
 
-	// std::cerr << "Loaded: " << dl_name << std::endl;
-
 	if (dl_name && strstr(dl_name, search_data->target_lib_name)) {
 		search_data->base_address = info->dlpi_addr; // This is the base address
 		search_data->found = true;
@@ -126,13 +136,19 @@ static int wrapped_main(int argc, char** argv, char** env) {
 		return real_main(argc, argv, env);
 	}
 
+	char* dcuz_speedup = getenv("DCUZ_SPEEDUP");
+	if (!dcuz_speedup) {
+		std::cerr << "DCUZ_SPEEDUP not found, running without speedup." << std::endl;
+	} else {
+		delay_length_ns = std::stof(dcuz_speedup) * 10000;
+	}
+
 	if (!found) {
-		std::cerr << "Unable to find correct module and offset, running without profiler." << std::endl;
+		std::cerr << "Unable to find correct module and offset (" << module_name << ":" << module_offset << "), running without profiler." << std::endl;
 		return real_main(argc, argv, env);
 	}
 
-	// std::cerr << "Found module " << module_name << ", profiling ip 0x" << std::hex << ip << std::endl;
-	if (!p.init(ip, 10000, 4, 1e7)) {
+	if (!p.init(ip, 10000, 4, 1e6)) {
 		std::cerr << "Failed to initialize profiler, running without it." << std::endl;
 		return real_main(argc, argv, env);
 	}
@@ -143,7 +159,11 @@ static int wrapped_main(int argc, char** argv, char** env) {
 	}
 
 	// Run the real main function
+	timespec start;
+	clock_gettime(CLOCK_MONOTONIC, &start);
 	int result = real_main(argc, argv, env);
+	timespec end;
+	clock_gettime(CLOCK_MONOTONIC, &end);
 
 	// Increment the end-to-end progress point just before shutdown
 	/*if(end_to_end) {
@@ -160,8 +180,17 @@ static int wrapped_main(int argc, char** argv, char** env) {
 
 	outf.open(filename);
 	if (outf.is_open()) {
+		long billion = 1000000000L;
+		long ns_passed = billion * (end.tv_sec - start.tv_sec) + (long)(end.tv_nsec) - (long)(start.tv_nsec);
+		delayed_ns += p.get_hit_counts() * delay_length_ns;
+
+		outf << module_name << std::endl;
+		outf << module_offset << std::endl;
+		outf << dcuz_speedup << std::endl;
 		outf << p.get_hit_counts() << std::endl;
 		outf << p.get_profile_counts() << std::endl;
+		outf << delayed_ns << std::endl;
+		outf << ns_passed << std::endl;
 		outf.close();
 	} else {
 		std::cerr << p.get_hit_counts() << std::endl;

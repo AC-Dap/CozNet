@@ -3,6 +3,7 @@
 
 struct PacketMetadata {
     uint32_t number_server_calls;
+    uint32_t total_virtual_delay;
     uint32_t data_size;
 };
 

@@ -6,6 +6,7 @@
 #include <ctime>
 #include <poll.h>
 #include <vector>
+#include <unordered_map>
 #include <utility>
 #include <sys/epoll.h>
 #include <sys/stat.h>
@@ -17,6 +18,7 @@
 #include "utils/time.hpp"
 #include "utils/packetqueue.hpp"
 #include "socket_hook.hpp"
+#include "profiler.hpp"
 
 constexpr size_t MAGIC = 0xabcdeffedcba;
 constexpr size_t PACKET_SIZE = 1024;
@@ -39,6 +41,11 @@ accept4_t real_accept4 = nullptr;
 
 std::vector<std::pair<int, PacketQueue*>> fds;
 MemoryPool mp(1024, PACKET_SIZE);
+
+extern Profiler p;
+extern size_t delay_length_ns;
+extern uint64_t delayed_ns;
+timespec last_blocking_time;
 
 PacketQueue* get_packet_queue(int fd) {
 	for (int i = 0; i < fds.size(); i++) {
@@ -103,8 +110,19 @@ ssize_t read_to_queue(int fd, PacketQueue* pq) {
 				PacketMetadata meta;
 				memcpy(&meta, read_buf + nconsumed + sizeof(MAGIC), sizeof(PacketMetadata));
 
-				// Add required delay to wakeup time
-				add_ns(&entry.wakeup_time, 10000 * meta.number_server_calls);
+				// Delay:
+				//		Pos: How much "virtual time" we should account for based on this server.
+				//		Neg: How much "virtual time" we should account for based on remote server.
+				long long packet_delay = p.get_hit_counts() * delay_length_ns + delayed_ns;
+				packet_delay -= meta.number_server_calls * delay_length_ns + meta.total_virtual_delay;
+
+				if (packet_delay < 0) {
+					long long blocking_time = 1e9 * (wakeup_time.tv_sec - last_blocking_time.tv_sec)
+						+ (wakeup_time.tv_nsec - last_blocking_time.tv_nsec);
+					delayed_ns += std::min(-packet_delay, blocking_time);
+				} else {
+					add_ns(&entry.wakeup_time, packet_delay);
+				}
 
 				// Set packet len
 				entry.len = meta.data_size;
@@ -149,6 +167,7 @@ extern "C" ssize_t read(int fd, void *buf, size_t count) {
 
 	// If wait queue is currently empty, do a blocking read for a new packet
 	if (pq->get_size() == 0) {
+		clock_gettime(CLOCK_MONOTONIC, &last_blocking_time);
 		ssize_t ret = read_to_queue(fd, pq);
 		if (ret <= 0) return ret;
 	}
@@ -174,8 +193,7 @@ extern "C" ssize_t read(int fd, void *buf, size_t count) {
         }
 
         // Otherwise wait for timeout
-        timespec timeout = time_diff(head->wakeup_time, now);
-        int ready = ppoll(nullptr, 0, &timeout, nullptr);
+        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &head->wakeup_time, nullptr);
         // Timeout: packet head is now ready, loop again to process
     }
 }
@@ -201,6 +219,7 @@ extern "C" int epoll_pwait(int epfd, struct epoll_event events[], int maxevents,
 	}
 
 	while(nfds == 0 && (timeout == -1 || (timeout != -1 && timeout > time_spent))) {
+		clock_gettime(CLOCK_MONOTONIC, &last_blocking_time);
 		nfds = real_epoll_pwait(epfd, events, maxevents, timeout - time_spent, sigmask);
 
 		timespec end_time;
@@ -271,7 +290,11 @@ extern "C" ssize_t write(int fd, const void *buf, size_t count) {
 	char new_buf[PACKET_SIZE];
 
 	// Copy over metadata before buf
-	PacketMetadata meta = { .number_server_calls = 0, .data_size = uint32_t(count) };
+	PacketMetadata meta {
+		.number_server_calls = p.get_hit_counts(),
+		.total_virtual_delay = delayed_ns,
+		.data_size = uint32_t(count)
+	};
 	memcpy(new_buf, &MAGIC, sizeof(MAGIC));
 	memcpy(new_buf + sizeof(MAGIC), &meta, sizeof(PacketMetadata));
 
