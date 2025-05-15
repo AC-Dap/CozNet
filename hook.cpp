@@ -148,7 +148,7 @@ static int wrapped_main(int argc, char** argv, char** env) {
 		return real_main(argc, argv, env);
 	}
 
-	if (!p.init(ip, 10000, 4, 1e6)) {
+	if (!p.init(ip, 10000, 10, 1e6)) {
 		std::cerr << "Failed to initialize profiler, running without it." << std::endl;
 		return real_main(argc, argv, env);
 	}

@@ -44,6 +44,7 @@ if __name__ == "__main__":
 
     speedups = [0.2, 0.4, 0.6, 0.8, 1]
     experiment_results = []
+    i = 0
     for index, rows in all_mappings.iterrows():
         for speedup in speedups:
             result = run_experiment(args.script, args.script_args, rows['module'], rows['offset'], speedup)
@@ -53,13 +54,17 @@ if __name__ == "__main__":
                 'result': result
             })
             print(f"{rows['source']}:{rows['line']} with {speedup * 100}% speedup had {result}")
+
+        # Occasionally save progress
+        i += 1
+        if i % 100 == 0:
+            pd.DataFrame(experiment_results).to_csv(args.output, index=False)
     baseline = run_experiment(args.script, args.script_args,
-                              all_mappings.iloc[0, 'module'], all_mappings.iloc[0, 'offset'], 0)
+                              all_mappings.loc[0, 'module'], all_mappings.loc[0, 'offset'], 0)
     experiment_results.append({
         'line': "baseline",
         'speedup': 0,
         'result': baseline
     })
 
-    df = pd.DataFrame(experiment_results)
-    df.to_csv(args.output, index=False)
+    pd.DataFrame(experiment_results).to_csv(args.output, index=False)

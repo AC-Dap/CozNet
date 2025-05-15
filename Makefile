@@ -13,7 +13,7 @@ server: server.c
 	cc server.c -o server $(PKG_CFLAGS) -g -Wl,-rpath=$(PKG_RPATH)
 
 dcuz: $(CPP_FILES) $(HPP_FILES)
-	g++ -shared -fPIC -ldl $(CPP_FILES) -o dcuz.so
+	g++ -g -shared -fPIC -ldl $(CPP_FILES) -o dcuz.so
 
 .PHONY: run_cluster
 run_cluster: cluster server dcuz
